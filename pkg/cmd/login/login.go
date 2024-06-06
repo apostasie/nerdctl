@@ -19,6 +19,7 @@ package login
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
@@ -27,16 +28,13 @@ import (
 	"os"
 	"strings"
 
+	"github.com/containerd/containerd/errdefs"
 	"github.com/containerd/containerd/remotes/docker"
-	"github.com/containerd/containerd/remotes/docker/config"
+	dockerconfig "github.com/containerd/containerd/remotes/docker/config"
 	"github.com/containerd/log"
 	"github.com/containerd/nerdctl/v2/pkg/api/types"
+	"github.com/containerd/nerdctl/v2/pkg/dockerutil"
 	"github.com/containerd/nerdctl/v2/pkg/errutil"
-	"github.com/containerd/nerdctl/v2/pkg/imgutil/dockerconfigresolver"
-	dockercliconfig "github.com/docker/cli/cli/config"
-	dockercliconfigtypes "github.com/docker/cli/cli/config/types"
-	"github.com/docker/docker/api/types/registry"
-	"github.com/docker/docker/errdefs"
 	"golang.org/x/net/context/ctxhttp"
 	"golang.org/x/term"
 )
@@ -46,147 +44,140 @@ Configure a credential helper to remove this warning. See
 https://docs.docker.com/engine/reference/commandline/login/#credentials-store
 `
 
-type isFileStore interface {
-	IsFileStore() bool
-	GetFilename() string
-}
-
 func Login(ctx context.Context, options types.LoginCommandOptions, stdout io.Writer) error {
-	var serverAddress string
-	if options.ServerAddress == "" {
-		serverAddress = dockerconfigresolver.IndexServer
-	} else {
-		serverAddress = options.ServerAddress
+	// If we cannot even parse the address, bail out
+	serverURL, err := dockerutil.Parse(options.ServerAddress)
+	if err != nil {
+		return fmt.Errorf("failed parsing requested server url %q (%w)", options.ServerAddress, err)
+	}
+
+	// Get a credentialStore (does not error on ENOENT).
+	// If it errors, it is a hard filesystem error or a JSON parsing error, and login in that context does not make sense, so, just stop.
+	credentialsStore, err := dockerutil.New("")
+	if err != nil {
+		return fmt.Errorf("credentials store is broken for registry %q (%w)", options.ServerAddress, err)
+	}
+
+	// Get an authconfig object for that registry, and only check the store if no username nor password was provided
+	// If it errored, we'll deal with it later
+	authConfig, err := credentialsStore.GetAuthConfigFor(serverURL, options.Username == "" && options.Password == "")
+	if err != nil {
+		//  else {
+		//				log.L.WithError(err).Warnf("cannot get auth config for authConfigHostname=%q (refHostname=%q)",
+		//					identifier, serverURL.Host)
+		//			}
+
+	}
+
+	// Delete any possible identityToken from there
+	authConfig.IdentityToken = ""
+
+	// Get the hosts dirs that exist and that we can read
+	hostsDirs := dockerutil.ValidateDirectories(options.GOptions.HostsDir)
+
+	// Prepare host options
+	ho := &dockerconfig.HostOptions{
+		DefaultScheme: "https",
+		Credentials:   credentialsStore.GetCredentialsFunction(ctx, authConfig),
+	}
+
+	// Attach the hosts resolution function, dealing with both explicit port and without (if 443)
+	ho.HostDir = func(s string) (string, error) {
+		for _, hostsDir := range hostsDirs {
+			found, err := dockerconfig.HostDirFromRoot(hostsDir)(s)
+			if (err != nil && !errdefs.IsNotFound(err)) || (found != "") {
+				return found, err
+			}
+			// Try again without the port if it is standard
+			if serverURL.Port() == "443" {
+				// no need to reparse from s as s = serverURL.String()
+				found, err = dockerconfig.HostDirFromRoot(hostsDir)(serverURL.Hostname())
+				if (err != nil && !errdefs.IsNotFound(err)) || (found != "") {
+					return found, err
+				}
+			}
+		}
+		return "", nil
+	}
+
+	// Set to insecure if asked by the user, or if it is localhost and the user did NOT set the flag explicitly (to false)
+	if options.GOptions.InsecureRegistry || (docker.IsLocalhost(serverURL.Hostname()) && !options.GOptions.ExplicitInsecureRegistry) {
+		log.G(ctx).Warnf("by using insecure registry, we are skipping verifying HTTPS certs and will allow downgrading to plain HTTP for %q", serverURL.Host)
+		ho.DefaultTLS = &tls.Config{
+			InsecureSkipVerify: true,
+		}
+		// Shouldn't we set that after the first failure instead?
+		ho.DefaultScheme = "http"
+	}
+
+	// Get all configured hosts for that server
+	regHosts, configHostsErr := dockerconfig.ConfigureHosts(ctx, *ho)(serverURL.Host)
+	if configHostsErr != nil {
+		return configHostsErr
+	}
+
+	if len(regHosts) == 0 {
+		return fmt.Errorf("got empty []docker.RegistryHost for %q", serverURL.Host)
 	}
 
 	var responseIdentityToken string
-	isDefaultRegistry := serverAddress == dockerconfigresolver.IndexServer
-
-	authConfig, err := GetDefaultAuthConfig(options.Username == "" && options.Password == "", serverAddress, isDefaultRegistry)
-	if authConfig == nil {
-		authConfig = &registry.AuthConfig{ServerAddress: serverAddress}
-	}
+	// If we found a username and password from the store, and it did not error, then try to log in with that
 	if err == nil && authConfig.Username != "" && authConfig.Password != "" {
-		//login With StoreCreds
-		responseIdentityToken, err = loginClientSide(ctx, options.GOptions, *authConfig)
+		responseIdentityToken, err = loginClientSide(ctx, ho, regHosts, options.GOptions.InsecureRegistry)
 	}
 
+	// if we had an error reading from the CredentialStore, or if above failed, or we did not have username / password, ask the user for what's missing and try (again)
 	if err != nil || authConfig.Username == "" || authConfig.Password == "" {
-		err = ConfigureAuthentication(authConfig, options.Username, options.Password)
+		err = promptUserForAuthentication(authConfig, options.Username, options.Password)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed reading credentials %w", err)
 		}
 
-		responseIdentityToken, err = loginClientSide(ctx, options.GOptions, *authConfig)
+		responseIdentityToken, err = loginClientSide(ctx, ho, regHosts, options.GOptions.InsecureRegistry)
 		if err != nil {
-			return err
+			return fmt.Errorf("failed logging in with provided credentials %w", err)
 		}
 	}
 
+	// If we got an identity token back, this is what we are going to store instead of the password
 	if responseIdentityToken != "" {
 		authConfig.Password = ""
 		authConfig.IdentityToken = responseIdentityToken
 	}
 
-	dockerConfigFile, err := dockercliconfig.Load("")
-	if err != nil {
-		return err
-	}
-
-	creds := dockerConfigFile.GetCredentialsStore(serverAddress)
-
-	store, isFile := creds.(isFileStore)
 	// Display a warning if we're storing the users password (not a token) and credentials store type is file.
-	if isFile && authConfig.Password != "" {
-		_, err = fmt.Fprintln(stdout, fmt.Sprintf(unencryptedPasswordWarning, store.GetFilename()))
-		if err != nil {
-			return err
-		}
-	}
+	if authConfig.Password != "" {
+		filename := credentialsStore.IsStoreFile(serverURL)
 
-	if err := creds.Store(dockercliconfigtypes.AuthConfig(*(authConfig))); err != nil {
-		return fmt.Errorf("error saving credentials: %w", err)
-	}
-
-	fmt.Fprintln(stdout, "Login Succeeded")
-
-	return nil
-}
-
-// GetDefaultAuthConfig gets the default auth config given a serverAddress.
-// If credentials for given serverAddress exists in the credential store, the configuration will be populated with values in it.
-// Code from github.com/docker/cli/cli/command (v20.10.3).
-func GetDefaultAuthConfig(checkCredStore bool, serverAddress string, isDefaultRegistry bool) (*registry.AuthConfig, error) {
-	if !isDefaultRegistry {
-		var err error
-		serverAddress, err = convertToHostname(serverAddress)
-		if err != nil {
-			return nil, err
-		}
-	}
-	var authconfig = dockercliconfigtypes.AuthConfig{}
-	if checkCredStore {
-		dockerConfigFile, err := dockercliconfig.Load("")
-		if err != nil {
-			return nil, err
-		}
-		authconfig, err = dockerConfigFile.GetAuthConfig(serverAddress)
-		if err != nil {
-			return nil, err
-		}
-	}
-	authconfig.ServerAddress = serverAddress
-	authconfig.IdentityToken = ""
-	res := registry.AuthConfig(authconfig)
-	return &res, nil
-}
-
-func loginClientSide(ctx context.Context, globalOptions types.GlobalCommandOptions, auth registry.AuthConfig) (string, error) {
-	host, err := convertToHostname(auth.ServerAddress)
-	if err != nil {
-		return "", err
-	}
-	var dOpts []dockerconfigresolver.Opt
-	if globalOptions.InsecureRegistry {
-		log.G(ctx).Warnf("skipping verifying HTTPS certs for %q", host)
-		dOpts = append(dOpts, dockerconfigresolver.WithSkipVerifyCerts(true))
-	}
-	dOpts = append(dOpts, dockerconfigresolver.WithHostsDirs(globalOptions.HostsDir))
-
-	authCreds := func(acArg string) (string, string, error) {
-		if acArg == host {
-			if auth.RegistryToken != "" {
-				// Even containerd/CRI does not support RegistryToken as of v1.4.3,
-				// so, nobody is actually using RegistryToken?
-				log.G(ctx).Warnf("RegistryToken (for %q) is not supported yet (FIXME)", host)
+		if filename != "" {
+			_, err = fmt.Fprintln(stdout, fmt.Sprintf(unencryptedPasswordWarning, filename))
+			if err != nil {
+				return err
 			}
-			return auth.Username, auth.Password, nil
 		}
-		return "", "", fmt.Errorf("expected acArg to be %q, got %q", host, acArg)
 	}
 
-	dOpts = append(dOpts, dockerconfigresolver.WithAuthCreds(authCreds))
-	ho, err := dockerconfigresolver.NewHostOptions(ctx, host, dOpts...)
-	if err != nil {
-		return "", err
+	if err = credentialsStore.Save(authConfig); err != nil {
+		return fmt.Errorf("error during login: %w", err)
 	}
+
+	_, err = fmt.Fprintln(stdout, "Login Succeeded")
+
+	return err
+}
+
+func loginClientSide(ctx context.Context, ho *dockerconfig.HostOptions, regHosts []docker.RegistryHost, insecure bool) (string, error) {
 	fetchedRefreshTokens := make(map[string]string) // key: req.URL.Host
 	// onFetchRefreshToken is called when tryLoginWithRegHost calls rh.Authorizer.Authorize()
 	onFetchRefreshToken := func(ctx context.Context, s string, req *http.Request) {
 		fetchedRefreshTokens[req.URL.Host] = s
 	}
 	ho.AuthorizerOpts = append(ho.AuthorizerOpts, docker.WithFetchRefreshToken(onFetchRefreshToken))
-	regHosts, err := config.ConfigureHosts(ctx, *ho)(host)
-	if err != nil {
-		return "", err
-	}
-	log.G(ctx).Debugf("len(regHosts)=%d", len(regHosts))
-	if len(regHosts) == 0 {
-		return "", fmt.Errorf("got empty []docker.RegistryHost for %q", host)
-	}
+
+	var err error
 	for i, rh := range regHosts {
 		err = tryLoginWithRegHost(ctx, rh)
-		if err != nil && globalOptions.InsecureRegistry && (errutil.IsErrHTTPResponseToHTTPSClient(err) || errutil.IsErrConnectionRefused(err)) {
+		if err != nil && insecure && (errutil.IsErrHTTPResponseToHTTPSClient(err) || errutil.IsErrConnectionRefused(err)) {
 			rh.Scheme = "http"
 			err = tryLoginWithRegHost(ctx, rh)
 		}
@@ -225,7 +216,7 @@ func tryLoginWithRegHost(ctx context.Context, rh docker.RegistryHost) error {
 				req.Header.Add(k, vv)
 			}
 		}
-		if err := rh.Authorizer.Authorize(ctx, req); err != nil {
+		if err = rh.Authorizer.Authorize(ctx, req); err != nil {
 			return fmt.Errorf("failed to call rh.Authorizer.Authorize: %w", err)
 		}
 		res, err := ctxhttp.Do(ctx, rh.Client, req)
@@ -234,7 +225,7 @@ func tryLoginWithRegHost(ctx context.Context, rh docker.RegistryHost) error {
 		}
 		ress = append(ress, res)
 		if res.StatusCode == 401 {
-			if err := rh.Authorizer.AddResponses(ctx, ress); err != nil && !errdefs.IsNotImplemented(err) {
+			if err = rh.Authorizer.AddResponses(ctx, ress); err != nil && !errdefs.IsNotImplemented(err) {
 				return fmt.Errorf("failed to call rh.Authorizer.AddResponses: %w", err)
 			}
 			continue
@@ -249,11 +240,12 @@ func tryLoginWithRegHost(ctx context.Context, rh docker.RegistryHost) error {
 	return errors.New("too many 401 (probably)")
 }
 
-func ConfigureAuthentication(authConfig *registry.AuthConfig, username, password string) error {
-	authConfig.Username = strings.TrimSpace(authConfig.Username)
+func promptUserForAuthentication(authConfig *dockerutil.AuthConfig, username, password string) error {
+	// If the provided username is empty, use the one we know of
 	if username = strings.TrimSpace(username); username == "" {
 		username = authConfig.Username
 	}
+	// If the one from the store is empty as well, read it
 	if username == "" {
 		fmt.Print("Enter Username: ")
 		usr, err := readUsername()
@@ -262,10 +254,12 @@ func ConfigureAuthentication(authConfig *registry.AuthConfig, username, password
 		}
 		username = usr
 	}
+	// If it still is empty, that is an error
 	if username == "" {
 		return fmt.Errorf("error: Username is Required")
 	}
 
+	// If password was NOT passed along, ask for it
 	if password == "" {
 		fmt.Print("Enter Password: ")
 		pwd, err := readPassword()
@@ -275,10 +269,12 @@ func ConfigureAuthentication(authConfig *registry.AuthConfig, username, password
 		}
 		password = pwd
 	}
+	// If nothing was provided, error out
 	if password == "" {
 		return fmt.Errorf("error: Password is Required")
 	}
 
+	// Attach that to the auth object
 	authConfig.Username = username
 	authConfig.Password = password
 
@@ -301,23 +297,4 @@ func readUsername() (string, error) {
 	username = strings.TrimSpace(username)
 
 	return username, nil
-}
-
-func convertToHostname(serverAddress string) (string, error) {
-	// Ensure that URL contains scheme for a good parsing process
-	if strings.Contains(serverAddress, "://") {
-		u, err := url.Parse(serverAddress)
-		if err != nil {
-			return "", err
-		}
-		serverAddress = u.Host
-	} else {
-		u, err := url.Parse("https://" + serverAddress)
-		if err != nil {
-			return "", err
-		}
-		serverAddress = u.Host
-	}
-
-	return serverAddress, nil
 }

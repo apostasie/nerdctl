@@ -17,11 +17,13 @@
 package testregistry
 
 import (
+	"bufio"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	"github.com/containerd/nerdctl/v2/pkg/testutil"
 	"github.com/containerd/nerdctl/v2/pkg/testutil/nettestutil"
@@ -32,61 +34,75 @@ import (
 )
 
 type TestRegistry struct {
-	IP         net.IP
-	ListenIP   net.IP
-	ListenPort int
-	HostsDir   string // contains "<HostIP>:<ListenPort>/hosts.toml"
-	Cleanup    func()
-	Logs       func()
+	IP       net.IP
+	Port     int
+	Scheme   string
+	ListenIP net.IP
+	Cleanup  func()
+	Logs     func()
+	HostsDir string // contains "<HostIP>:<ListenPort>/hosts.toml"
 }
 
-func NewPlainHTTP(base *testutil.Base, port int) *TestRegistry {
-	hostIP, err := nettestutil.NonLoopbackIPv4()
-	assert.NilError(base.T, err)
-	// listen on 0.0.0.0 to enable 127.0.0.1
-	listenIP := net.ParseIP("0.0.0.0")
-	listenPort := port
-	base.T.Logf("hostIP=%q, listenIP=%q, listenPort=%d", hostIP, listenIP, listenPort)
-
-	registryContainerName := "reg-" + testutil.Identifier(base.T)
-	cmd := base.Cmd("run",
-		"-d",
-		"-p", fmt.Sprintf("%s:%d:5000", listenIP, listenPort),
-		"--name", registryContainerName,
-		testutil.RegistryImage)
-	cmd.AssertOK()
-	if _, err = nettestutil.HTTPGet(fmt.Sprintf("http://%s:%d/v2", hostIP.String(), listenPort), 30, false); err != nil {
-		base.Cmd("rm", "-f", registryContainerName).Run()
-		base.T.Fatal(err)
-	}
-	return &TestRegistry{
-		IP:         hostIP,
-		ListenIP:   listenIP,
-		ListenPort: listenPort,
-		Cleanup:    func() { base.Cmd("rm", "-f", registryContainerName).AssertOK() },
-	}
+type TestTokenAuth struct {
+	IP       net.IP
+	Port     int
+	Scheme   string
+	ListenIP net.IP
+	Cleanup  func()
+	Logs     func()
+	Auth     Auth
+	CertPath string
 }
 
-func NewAuthWithHTTP(base *testutil.Base, user, pass string, listenPort int, authPort int) *TestRegistry {
+// Note: since port are DNAT-ed, just trying to listen on the port won't do anything
+// Either inspect iptables or whatever nerdctl reports
+// Neither approach are bulletproof unfortunately and might fail dependent on how network is set up
+func nextAvailablePort(base *testutil.Base, start int) (int, error) {
+	usedPorts := map[string]bool{}
+	all := base.Cmd("container", "ls", "-a", "--format", "{{.Ports}}")
+	all.AssertOK()
+	scanner := bufio.NewScanner(strings.NewReader(all.Out()))
+	for scanner.Scan() {
+		port := strings.Split(scanner.Text(), "->")
+		port = strings.Split(port[0], ":")
+		usedPorts[port[1]] = true
+	}
+
+	for _, used := usedPorts[strconv.Itoa(start)]; used; _, used = usedPorts[strconv.Itoa(start)] {
+		start++
+	}
+
+	return start, nil
+}
+
+func NewAuthServer(base *testutil.Base, ca *testca.CA, port int, user, pass string, tls bool) *TestTokenAuth {
 	name := testutil.Identifier(base.T)
-	hostIP, err := nettestutil.NonLoopbackIPv4()
-	assert.NilError(base.T, err)
 	// listen on 0.0.0.0 to enable 127.0.0.1
 	listenIP := net.ParseIP("0.0.0.0")
-	base.T.Logf("hostIP=%q, listenIP=%q, listenPort=%d, authPort=%d", hostIP, listenIP, listenPort, authPort)
-
-	ca := testca.New(base.T)
-	registryCert := ca.NewCert(hostIP.String())
-	authCert := ca.NewCert(hostIP.String())
+	hostIP, err := nettestutil.NonLoopbackIPv4()
+	assert.NilError(base.T, err)
+	if port == 0 {
+		port, err = nextAvailablePort(base, 5005)
+		assert.NilError(base.T, err)
+	}
+	containerName := fmt.Sprintf("auth-%s-%d", name, port)
 
 	// Prepare configuration file for authentication server
 	// Details: https://github.com/cesanta/docker_auth/blob/1.7.1/examples/simple.yml
-	authConfigFile, err := os.CreateTemp("", "authconfig")
+	configFile, err := os.CreateTemp("", "authconfig")
 	assert.NilError(base.T, err)
 	bpass, err := bcrypt.GenerateFromPassword([]byte(pass), bcrypt.DefaultCost)
 	assert.NilError(base.T, err)
-	authConfigFileName := authConfigFile.Name()
-	_, err = authConfigFile.Write([]byte(fmt.Sprintf(`
+	configFileName := configFile.Name()
+	//tlsCert := ""
+	//tlsKey := ""
+	scheme := "http"
+	if tls {
+		scheme = "https"
+		//tlsCert = "/auth/domain.crt"
+		//tlsKey = "/auth/domain.key"
+	}
+	_, err = configFile.Write([]byte(fmt.Sprintf(`
 server:
   addr: ":5100"
   certificate: "/auth/domain.crt"
@@ -103,182 +119,225 @@ acl:
 `, user, string(bpass), user)))
 	assert.NilError(base.T, err)
 
+	cert := ca.NewCert(hostIP.String())
+
 	// Run authentication server
-	authContainerName := fmt.Sprintf("auth-%s-%d", name, authPort)
 	cmd := base.Cmd("run",
 		"-d",
-		"-p", fmt.Sprintf("%s:%d:5100", listenIP, authPort),
-		"--name", authContainerName,
-		"-v", authCert.CertPath+":/auth/domain.crt",
-		"-v", authCert.KeyPath+":/auth/domain.key",
-		"-v", authConfigFileName+":/config/auth_config.yml",
+		"-p", fmt.Sprintf("%s:%d:5100", listenIP, port),
+		"--name", containerName,
+		"-v", cert.CertPath+":/auth/domain.crt",
+		"-v", cert.KeyPath+":/auth/domain.key",
+		"-v", configFileName+":/config/auth_config.yml",
 		testutil.DockerAuthImage,
 		"/config/auth_config.yml")
 	cmd.AssertOK()
 
-	// Run docker_auth-enabled registry
-	// Details: https://github.com/cesanta/docker_auth/blob/1.7.1/examples/simple.yml
-	registryContainerName := fmt.Sprintf("%s-%s-%d", "reg", name, listenPort)
-	cmd = base.Cmd("run",
-		"-d",
-		"-p", fmt.Sprintf("%s:%d:5000", listenIP, listenPort),
-		"--name", registryContainerName,
+	joined := net.JoinHostPort(hostIP.String(), strconv.Itoa(port))
+	if _, err = nettestutil.HTTPGet(fmt.Sprintf("%s://%s/auth", scheme, joined), 30, true); err != nil {
+		base.Cmd("rm", "-f", containerName).Run()
+		base.T.Fatal(err)
+	}
+
+	return &TestTokenAuth{
+		IP:       hostIP,
+		Port:     port,
+		Scheme:   scheme,
+		ListenIP: listenIP,
+		CertPath: cert.CertPath,
+		Auth: &TokenAuth{
+			Address:  scheme + "://" + net.JoinHostPort(hostIP.String(), strconv.Itoa(port)),
+			CertPath: cert.CertPath,
+		},
+		Cleanup: func() {
+			base.Cmd("rm", "-f", containerName).AssertOK()
+			assert.NilError(base.T, cert.Close())
+			assert.NilError(base.T, configFile.Close())
+			os.Remove(configFileName)
+			assert.NilError(base.T, cert.Close())
+		},
+		Logs: func() {
+			base.T.Logf("%s: %q", containerName, base.Cmd("logs", containerName).Run().String())
+		},
+	}
+
+}
+
+type Auth interface {
+	Params() []string
+}
+
+type NoAuth struct {
+}
+
+func (na *NoAuth) Params() []string {
+	return []string{}
+}
+
+type TokenAuth struct {
+	Address  string
+	CertPath string
+}
+
+func (ta *TokenAuth) Params() []string {
+	return []string{
 		"--env", "REGISTRY_AUTH=token",
-		"--env", "REGISTRY_AUTH_TOKEN_REALM="+fmt.Sprintf("https://%s:%d/auth", hostIP.String(), authPort),
+		"--env", "REGISTRY_AUTH_TOKEN_REALM=" + ta.Address + "/auth",
 		"--env", "REGISTRY_AUTH_TOKEN_SERVICE=Docker registry",
 		"--env", "REGISTRY_AUTH_TOKEN_ISSUER=Acme auth server",
 		"--env", "REGISTRY_AUTH_TOKEN_ROOTCERTBUNDLE=/auth/domain.crt",
-		// rootcertbundle is not CA cert: https://github.com/distribution/distribution/issues/1143
-		"-v", authCert.CertPath+":/auth/domain.crt",
-		testutil.RegistryImage)
-	cmd.AssertOK()
-	joined := net.JoinHostPort(hostIP.String(), strconv.Itoa(listenPort))
-	if _, err = nettestutil.HTTPGet(fmt.Sprintf("http://%s/v2", joined), 30, true); err != nil {
-		base.Cmd("rm", "-f", registryContainerName).Run()
-		base.T.Fatal(err)
-	}
-	hostsDir, err := os.MkdirTemp(base.T.TempDir(), "certs.d")
-	assert.NilError(base.T, err)
-	hostsSubDir := filepath.Join(hostsDir, joined)
-	err = os.MkdirAll(hostsSubDir, 0700)
-	assert.NilError(base.T, err)
-	hostsTOMLPath := filepath.Join(hostsSubDir, "hosts.toml")
-	// See https://github.com/containerd/containerd/blob/main/docs/hosts.md
-	hostsTOML := fmt.Sprintf(`
-server = "https://%s"
-[host."https://%s"]
-  ca = %q
-		`, joined, joined, ca.CertPath)
-	base.T.Logf("Writing %q: %q", hostsTOMLPath, hostsTOML)
-	err = os.WriteFile(hostsTOMLPath, []byte(hostsTOML), 0700)
-	assert.NilError(base.T, err)
-	return &TestRegistry{
-		IP:         hostIP,
-		ListenIP:   listenIP,
-		ListenPort: listenPort,
-		HostsDir:   hostsDir,
-		Cleanup: func() {
-			base.Cmd("rm", "-f", registryContainerName).AssertOK()
-			base.Cmd("rm", "-f", authContainerName).AssertOK()
-			assert.NilError(base.T, registryCert.Close())
-			assert.NilError(base.T, authCert.Close())
-			assert.NilError(base.T, authConfigFile.Close())
-			os.Remove(authConfigFileName)
-		},
-		Logs: func() {
-			base.T.Logf("%s: %q", registryContainerName, base.Cmd("logs", registryContainerName).Run().String())
-			base.T.Logf("%s: %q", authContainerName, base.Cmd("logs", authContainerName).Run().String())
-		},
+		"-v", ta.CertPath + ":/auth/domain.crt",
 	}
 }
 
-func NewHTTPS(base *testutil.Base, user, pass string) *TestRegistry {
+type BasicAuth struct {
+	Realm    string
+	HtFile   string
+	Username string
+	Password string
+}
+
+func (ba *BasicAuth) Params() []string {
+	if ba.Realm == "" {
+		ba.Realm = "Basic Realm"
+	}
+	if ba.HtFile == "" && ba.Username != "" && ba.Password != "" {
+		pass := ba.Password
+		encryptedPass, _ := bcrypt.GenerateFromPassword([]byte(pass), bcrypt.DefaultCost)
+		tmpDir, _ := os.MkdirTemp("", "htpasswd")
+		ba.HtFile = filepath.Join(tmpDir, "htpasswd")
+		_ = os.WriteFile(ba.HtFile, []byte(fmt.Sprintf(`%s:%s`, ba.Username, string(encryptedPass[:]))), 0600)
+	}
+	ret := []string{
+		"--env", "REGISTRY_AUTH=htpasswd",
+		"--env", "REGISTRY_AUTH_HTPASSWD_REALM=" + ba.Realm,
+		"--env", "REGISTRY_AUTH_HTPASSWD_PATH=/htpasswd",
+	}
+	if ba.HtFile != "" {
+		ret = append(ret, "-v", ba.HtFile+":/htpasswd")
+	}
+	return ret
+}
+
+func NewRegistry(base *testutil.Base, ca *testca.CA, port int, auth Auth) *TestRegistry {
 	name := testutil.Identifier(base.T)
-	hostIP, err := nettestutil.NonLoopbackIPv4()
-	assert.NilError(base.T, err)
 	// listen on 0.0.0.0 to enable 127.0.0.1
 	listenIP := net.ParseIP("0.0.0.0")
-	const listenPort = 5000 // TODO: choose random empty port
-	const authPort = 5100   // TODO: choose random empty port
-	base.T.Logf("hostIP=%q, listenIP=%q, listenPort=%d, authPort=%d", hostIP, listenIP, listenPort, authPort)
-
-	ca := testca.New(base.T)
-	registryCert := ca.NewCert(hostIP.String())
-	authCert := ca.NewCert(hostIP.String())
-
-	// Prepare configuration file for authentication server
-	// Details: https://github.com/cesanta/docker_auth/blob/1.7.1/examples/simple.yml
-	authConfigFile, err := os.CreateTemp("", "authconfig")
+	hostIP, err := nettestutil.NonLoopbackIPv4()
 	assert.NilError(base.T, err)
-	bpass, err := bcrypt.GenerateFromPassword([]byte(pass), bcrypt.DefaultCost)
+	if port == 0 {
+		port, err = nextAvailablePort(base, 5001)
+		assert.NilError(base.T, err)
+	}
 	assert.NilError(base.T, err)
-	authConfigFileName := authConfigFile.Name()
-	_, err = authConfigFile.Write([]byte(fmt.Sprintf(`
-server:
-  addr: ":5100"
-  certificate: "/auth/domain.crt"
-  key: "/auth/domain.key"
-token:
-  issuer: "Acme auth server"
-  expiration: 900
-users:
-  "%s":
-    password: "%s"
-acl:
-  - match: {account: "%s"}
-    actions: ["*"]
-`, user, string(bpass), user)))
-	assert.NilError(base.T, err)
+	containerName := fmt.Sprintf("registry-%s-%d", name, port)
 
-	// Run authentication server
-	authContainerName := "auth-" + name
-	cmd := base.Cmd("run",
+	args := []string{
+		"run",
 		"-d",
-		"-p", fmt.Sprintf("%s:%d:5100", listenIP, authPort),
-		"--name", authContainerName,
-		"-v", authCert.CertPath+":/auth/domain.crt",
-		"-v", authCert.KeyPath+":/auth/domain.key",
-		"-v", authConfigFileName+":/config/auth_config.yml",
-		testutil.DockerAuthImage,
-		"/config/auth_config.yml")
+		"-p", fmt.Sprintf("%s:%d:5000", listenIP, port),
+		"--name", containerName,
+	}
+
+	scheme := "http"
+	var cert *testca.Cert
+	if ca != nil {
+		scheme = "https"
+		cert = ca.NewCert(hostIP.String(), "127.0.0.1")
+		args = append(args,
+			"--env", "REGISTRY_HTTP_TLS_CERTIFICATE=/registry/domain.crt",
+			"--env", "REGISTRY_HTTP_TLS_KEY=/registry/domain.key",
+			"-v", cert.CertPath+":/registry/domain.crt",
+			"-v", cert.KeyPath+":/registry/domain.key",
+		)
+	}
+
+	args = append(args, auth.Params()...)
+
+	args = append(args, testutil.RegistryImage)
+	cmd := base.Cmd(args...)
 	cmd.AssertOK()
 
-	// Run docker_auth-enabled registry
-	// Details: https://github.com/cesanta/docker_auth/blob/1.7.1/examples/simple.yml
-	registryContainerName := "reg-" + name
-	cmd = base.Cmd("run",
-		"-d",
-		"-p", fmt.Sprintf("%s:%d:5000", listenIP, listenPort),
-		"--name", registryContainerName,
-		"--env", "REGISTRY_AUTH=token",
-		"--env", "REGISTRY_AUTH_TOKEN_REALM="+fmt.Sprintf("https://%s:%d/auth", hostIP.String(), authPort),
-		"--env", "REGISTRY_AUTH_TOKEN_SERVICE=Docker registry",
-		"--env", "REGISTRY_AUTH_TOKEN_ISSUER=Acme auth server",
-		"--env", "REGISTRY_AUTH_TOKEN_ROOTCERTBUNDLE=/auth/domain.crt",
-		"--env", "REGISTRY_HTTP_TLS_CERTIFICATE=/registry/domain.crt",
-		"--env", "REGISTRY_HTTP_TLS_KEY=/registry/domain.key",
-		// rootcertbundle is not CA cert: https://github.com/distribution/distribution/issues/1143
-		"-v", authCert.CertPath+":/auth/domain.crt",
-		"-v", registryCert.CertPath+":/registry/domain.crt",
-		"-v", registryCert.KeyPath+":/registry/domain.key",
-		testutil.RegistryImage)
-	cmd.AssertOK()
-	joined := net.JoinHostPort(hostIP.String(), strconv.Itoa(listenPort))
-	if _, err = nettestutil.HTTPGet(fmt.Sprintf("https://%s/v2", joined), 30, true); err != nil {
-		base.Cmd("rm", "-f", registryContainerName).Run()
+	if _, err = nettestutil.HTTPGet(fmt.Sprintf("%s://127.0.0.1:%s/v2", scheme, strconv.Itoa(port)), 30, true); err != nil {
+		base.Cmd("rm", "-f", containerName).Run()
 		base.T.Fatal(err)
 	}
+
 	hostsDir, err := os.MkdirTemp(base.T.TempDir(), "certs.d")
 	assert.NilError(base.T, err)
-	hostsSubDir := filepath.Join(hostsDir, joined)
-	err = os.MkdirAll(hostsSubDir, 0700)
-	assert.NilError(base.T, err)
-	hostsTOMLPath := filepath.Join(hostsSubDir, "hosts.toml")
-	// See https://github.com/containerd/containerd/blob/main/docs/hosts.md
-	hostsTOML := fmt.Sprintf(`
+
+	if ca != nil {
+		joined := net.JoinHostPort(hostIP.String(), strconv.Itoa(port))
+		hostsSubDir := filepath.Join(hostsDir, joined)
+		err = os.MkdirAll(hostsSubDir, 0700)
+		assert.NilError(base.T, err)
+		hostsTOMLPath := filepath.Join(hostsSubDir, "hosts.toml")
+		// See https://github.com/containerd/containerd/blob/main/docs/hosts.md
+		hostsTOML := fmt.Sprintf(`
 server = "https://%s"
 [host."https://%s"]
   ca = %q
 		`, joined, joined, ca.CertPath)
-	base.T.Logf("Writing %q: %q", hostsTOMLPath, hostsTOML)
-	err = os.WriteFile(hostsTOMLPath, []byte(hostsTOML), 0700)
-	assert.NilError(base.T, err)
+		base.T.Logf("Writing %q: %q", hostsTOMLPath, hostsTOML)
+		err = os.WriteFile(hostsTOMLPath, []byte(hostsTOML), 0700)
+		assert.NilError(base.T, err)
+
+		joined = net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+		hostsSubDir = filepath.Join(hostsDir, joined)
+		err = os.MkdirAll(hostsSubDir, 0700)
+		assert.NilError(base.T, err)
+		hostsTOMLPath = filepath.Join(hostsSubDir, "hosts.toml")
+		hostsTOML = fmt.Sprintf(`
+server = "https://%s"
+[host."https://%s"]
+  ca = %q
+		`, joined, joined, ca.CertPath)
+		base.T.Logf("Writing %q: %q", hostsTOMLPath, hostsTOML)
+		err = os.WriteFile(hostsTOMLPath, []byte(hostsTOML), 0700)
+		assert.NilError(base.T, err)
+	}
+
 	return &TestRegistry{
-		IP:         hostIP,
-		ListenIP:   listenIP,
-		ListenPort: listenPort,
-		HostsDir:   hostsDir,
+		IP:       hostIP,
+		Port:     port,
+		Scheme:   scheme,
+		ListenIP: listenIP,
 		Cleanup: func() {
-			base.Cmd("rm", "-f", registryContainerName).AssertOK()
-			base.Cmd("rm", "-f", authContainerName).AssertOK()
-			assert.NilError(base.T, registryCert.Close())
-			assert.NilError(base.T, authCert.Close())
-			assert.NilError(base.T, authConfigFile.Close())
-			os.Remove(authConfigFileName)
+			base.Cmd("rm", "-f", containerName).AssertOK()
+			if cert != nil {
+				assert.NilError(base.T, cert.Close())
+			}
 		},
 		Logs: func() {
-			base.T.Logf("%s: %q", registryContainerName, base.Cmd("logs", registryContainerName).Run().String())
-			base.T.Logf("%s: %q", authContainerName, base.Cmd("logs", authContainerName).Run().String())
+			base.T.Logf("%s: %q", containerName, base.Cmd("logs", containerName).Run().String())
 		},
+		HostsDir: hostsDir,
 	}
+
+}
+
+func NewAuthWithHTTP(base *testutil.Base, user, pass string, port int) (*TestRegistry, *TestTokenAuth) {
+	ca := testca.New(base.T)
+	as := NewAuthServer(base, ca, 0, user, pass, false)
+	auth := &TokenAuth{
+		Address:  as.Scheme + "://" + net.JoinHostPort(as.IP.String(), strconv.Itoa(as.Port)),
+		CertPath: as.CertPath,
+	}
+	re := NewRegistry(base, nil, port, auth)
+	return re, as
+}
+
+func NewPlainHTTP(base *testutil.Base, listenPort int) *TestRegistry {
+	return NewRegistry(base, nil, listenPort, &NoAuth{})
+}
+
+func NewHTTPS(base *testutil.Base, user, pass string) (*TestRegistry, *TestTokenAuth) {
+	ca := testca.New(base.T)
+	as := NewAuthServer(base, ca, 0, user, pass, true)
+	auth := &TokenAuth{
+		Address:  as.Scheme + "://" + net.JoinHostPort(as.IP.String(), strconv.Itoa(as.Port)),
+		CertPath: as.CertPath,
+	}
+	re := NewRegistry(base, ca, 0, auth)
+	return re, as
 }

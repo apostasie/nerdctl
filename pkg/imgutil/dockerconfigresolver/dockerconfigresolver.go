@@ -82,12 +82,6 @@ func WithHostsDirs(orig []string) Opt {
 	}
 }
 
-func WithAuthCreds(ac AuthCreds) Opt {
-	return func(o *opts) {
-		o.authCreds = ac
-	}
-}
-
 // NewHostOptions instantiates a HostOptions struct using $DOCKER_CONFIG/config.json .
 //
 // $DOCKER_CONFIG defaults to "~/.docker".
@@ -162,6 +156,8 @@ func New(ctx context.Context, refHostname string, optFuncs ...Opt) (remotes.Reso
 	resolver := docker.NewResolver(resolverOpts)
 	return resolver, nil
 }
+
+const IndexServer = "https://index.docker.io/v1/"
 
 // AuthCreds is for docker.WithAuthCreds
 type AuthCreds func(string) (string, string, error)

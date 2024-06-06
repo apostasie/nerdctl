@@ -432,12 +432,12 @@ func TestComposePushAndPullWithCosignVerify(t *testing.T) {
 	keyPair := newCosignKeyPair(t, "cosign-key-pair")
 	defer keyPair.cleanup()
 
-	reg := testregistry.NewPlainHTTP(base, 5000)
+	reg := testregistry.NewPlainHTTP(base, 0)
 	defer reg.Cleanup()
 	localhostIP := "127.0.0.1"
 	t.Logf("localhost IP=%q", localhostIP)
 	testImageRefPrefix := fmt.Sprintf("%s:%d/",
-		localhostIP, reg.ListenPort)
+		localhostIP, reg.Port)
 	t.Logf("testImageRefPrefix=%q", testImageRefPrefix)
 
 	var (
