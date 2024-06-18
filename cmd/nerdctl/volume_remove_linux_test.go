@@ -25,12 +25,20 @@ import (
 
 func TestVolumeRemove(t *testing.T) {
 	t.Parallel()
+
 	base := testutil.NewBase(t)
 	tID := testutil.Identifier(t)
 
+	var tearDown = func() {
+		base.Cmd("rm", "-f", tID).Run()
+		base.Cmd("volume", "rm", "-f", tID).Run()
+	}
+
+	tearDown()
+	t.Cleanup(tearDown)
+
 	base.Cmd("volume", "create", tID).AssertOK()
 	base.Cmd("run", "-v", fmt.Sprintf("%s:/volume", tID), "--name", tID, testutil.CommonImage).AssertOK()
-	defer base.Cmd("rm", "-f", tID).Run()
 
 	base.Cmd("volume", "rm", tID).AssertFail()
 	base.Cmd("rm", "-f", tID).AssertOK()

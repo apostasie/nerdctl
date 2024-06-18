@@ -25,17 +25,26 @@ import (
 
 // Test TestVolumeCreate for creating volume with given name.
 func TestVolumeCreate(t *testing.T) {
+	t.Parallel()
+
 	base := testutil.NewBase(t)
 	testVolume := testutil.Identifier(t)
 
-	base.Cmd("volume", "create", testVolume).AssertOK()
-	defer base.Cmd("volume", "rm", "-f", testVolume).Run()
+	var tearDown = func() {
+		base.Cmd("volume", "rm", "-f", testVolume).Run()
+	}
 
+	tearDown()
+	t.Cleanup(tearDown)
+
+	base.Cmd("volume", "create", testVolume).AssertOK()
 	base.Cmd("volume", "list").AssertOutContains(testVolume)
 }
 
 // Test TestVolumeCreateTooManyArgs for creating volume with too many args.
 func TestVolumeCreateTooManyArgs(t *testing.T) {
+	t.Parallel()
+
 	base := testutil.NewBase(t)
 
 	base.Cmd("volume", "create", "too", "many").AssertFail()
@@ -43,11 +52,19 @@ func TestVolumeCreateTooManyArgs(t *testing.T) {
 
 // Test TestVolumeCreateWithLabels for creating volume with given labels.
 func TestVolumeCreateWithLabels(t *testing.T) {
+	t.Parallel()
+
 	base := testutil.NewBase(t)
 	testVolume := testutil.Identifier(t)
 
+	var tearDown = func() {
+		base.Cmd("volume", "rm", "-f", testVolume).Run()
+	}
+
+	tearDown()
+	t.Cleanup(tearDown)
+
 	base.Cmd("volume", "create", testVolume, "--label", "foo1=baz1", "--label", "foo2=baz2").AssertOK()
-	defer base.Cmd("volume", "rm", "-f", testVolume).Run()
 
 	inspect := base.InspectVolume(testVolume)
 	inspectNerdctlLabels := *inspect.Labels

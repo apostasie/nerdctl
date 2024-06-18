@@ -19,7 +19,6 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"testing"
 
 	"github.com/containerd/nerdctl/v2/pkg/infoutil"
@@ -40,23 +39,29 @@ func testInfoJSON(stdout string) error {
 }
 
 func TestInfo(t *testing.T) {
+	t.Parallel()
+
 	base := testutil.NewBase(t)
 	base.Cmd("info", "--format", "{{json .}}").AssertOutWithFunc(testInfoJSON)
 }
 
 func TestInfoConvenienceForm(t *testing.T) {
-	testutil.DockerIncompatible(t) // until https://github.com/docker/cli/pull/3355 gets merged
+	t.Parallel()
+
 	base := testutil.NewBase(t)
 	base.Cmd("info", "--format", "json").AssertOutWithFunc(testInfoJSON)
 }
 
 func TestInfoWithNamespace(t *testing.T) {
 	testutil.DockerIncompatible(t)
+
+	t.Parallel()
+
 	base := testutil.NewBase(t)
 	base.Args = nil // unset "--namespace=nerdctl-test"
 
 	base.Cmd("info").AssertOutContains("Namespace:	default")
 
-	base.Env = append(os.Environ(), "CONTAINERD_NAMESPACE=test")
+	base.Env = append(base.Env, "CONTAINERD_NAMESPACE=test")
 	base.Cmd("info").AssertOutContains("Namespace:	test")
 }

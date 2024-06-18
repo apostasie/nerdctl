@@ -28,26 +28,43 @@ import (
 
 func TestVolumeInspectContainsLabels(t *testing.T) {
 	t.Parallel()
-	testVolume := testutil.Identifier(t)
 
 	base := testutil.NewBase(t)
-	base.Cmd("volume", "create", "--label", "tag=testVolume", testVolume).AssertOK()
-	defer base.Cmd("volume", "rm", "-f", testVolume).Run()
+	testVolume := testutil.Identifier(t)
+
+	var tearDown = func() {
+		base.Cmd("volume", "rm", "-f", testVolume).Run()
+	}
+
+	tearDown()
+	t.Cleanup(tearDown)
+
+	base.Cmd("volume", "create", testVolume, "--label", "foo1=baz1", "--label", "foo2=baz2").AssertOK()
 
 	inspect := base.InspectVolume(testVolume)
-	inspectNerdctlLabels := (*inspect.Labels)
-	expected := make(map[string]string, 1)
-	expected["tag"] = "testVolume"
+	inspectNerdctlLabels := *inspect.Labels
+	expected := make(map[string]string, 2)
+	expected["foo1"] = "baz1"
+	expected["foo2"] = "baz2"
 	assert.DeepEqual(base.T, expected, inspectNerdctlLabels)
 }
 
 func TestVolumeInspectSize(t *testing.T) {
 	testutil.DockerIncompatible(t)
+
 	t.Parallel()
-	testVolume := testutil.Identifier(t)
+
 	base := testutil.NewBase(t)
+	testVolume := testutil.Identifier(t)
+
+	var tearDown = func() {
+		base.Cmd("volume", "rm", "-f", testVolume).Run()
+	}
+
+	tearDown()
+	t.Cleanup(tearDown)
+
 	base.Cmd("volume", "create", testVolume).AssertOK()
-	defer base.Cmd("volume", "rm", "-f", testVolume).Run()
 
 	var size int64 = 1028
 	createFileWithSize(t, testVolume, size)
@@ -59,7 +76,8 @@ func createFileWithSize(t *testing.T, volume string, bytes int64) {
 	base := testutil.NewBase(t)
 	v := base.InspectVolume(volume)
 	token := make([]byte, bytes)
-	rand.Read(token)
-	err := os.WriteFile(filepath.Join(v.Mountpoint, "test-file"), token, 0644)
+	_, err := rand.Read(token)
+	assert.NilError(t, err)
+	err = os.WriteFile(filepath.Join(v.Mountpoint, "test-file"), token, 0644)
 	assert.NilError(t, err)
 }

@@ -24,16 +24,23 @@ import (
 )
 
 func TestVolumePrune(t *testing.T) {
-	base := testutil.NewBase(t)
+	t.Parallel()
+
+	base := testutil.NewBaseWithNamespace(t, testutil.Identifier(t))
 	tID := testutil.Identifier(t)
-	base.Cmd("volume", "prune", "-a", "-f").Run()
+
+	var tearDown = func() {
+		base.Cmd("rm", "-f", tID).Run()
+		base.Cmd("volume", "prune", "-a", "-f").Run()
+	}
+
+	tearDown()
+	t.Cleanup(tearDown)
 
 	vID := base.Cmd("volume", "create").Out()
 	base.Cmd("volume", "create", tID+"-1").AssertOK()
 	base.Cmd("volume", "create", tID+"-2").AssertOK()
-
 	base.Cmd("run", "-v", fmt.Sprintf("%s:/volume", tID+"-1"), "--name", tID, testutil.CommonImage).AssertOK()
-	defer base.Cmd("rm", "-f", tID).Run()
 
 	base.Cmd("volume", "prune", "-f").AssertOutContains(vID)
 	base.Cmd("volume", "prune", "-a", "-f").AssertOutContains(tID + "-2")

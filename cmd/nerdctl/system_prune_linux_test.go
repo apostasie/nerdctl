@@ -32,41 +32,53 @@ import (
 
 func TestSystemPrune(t *testing.T) {
 	testutil.RequiresBuild(t)
-	base := testutil.NewBase(t)
+
+	// This is pending https://github.com/containerd/nerdctl/pull/3096
+	// Right now, networks are not namespaced, making this unsafe to parallelize
+	// t.Parallel()
+
+	base := testutil.NewBaseWithNamespace(t, testutil.Identifier(t))
+	tID := testutil.Identifier(t)
+
+	var tearDown = func() {
+		base.Cmd("network", "rm", tID).Run()
+		base.Cmd("volume", "rm", tID).Run()
+		base.Cmd("rm", "-f", tID).Run()
+	}
+
+	tearDown()
+	t.Cleanup(tearDown)
+
 	base.Cmd("container", "prune", "-f").AssertOK()
 	base.Cmd("network", "prune", "-f").AssertOK()
 	base.Cmd("volume", "prune", "-f").AssertOK()
 	base.Cmd("image", "prune", "-f", "--all").AssertOK()
 
-	nID := testutil.Identifier(t)
-	base.Cmd("network", "create", nID).AssertOK()
-	defer base.Cmd("network", "rm", nID).Run()
+	base.Cmd("network", "create", tID).AssertOK()
+	base.Cmd("volume", "create", tID).AssertOK()
+	vID := base.Cmd("volume", "create").Out()
+	t.Cleanup(func() {
+		base.Cmd("volume", "rm", vID).Run()
+	})
 
-	vID := testutil.Identifier(t)
-	base.Cmd("volume", "create", vID).AssertOK()
-	defer base.Cmd("volume", "rm", vID).Run()
-
-	vID2 := base.Cmd("volume", "create").Out()
-	defer base.Cmd("volume", "rm", vID2).Run()
-
-	tID := testutil.Identifier(t)
-	base.Cmd("run", "-v", fmt.Sprintf("%s:/volume", vID), "--net", nID,
+	base.Cmd("run", "-v", fmt.Sprintf("%s:/volume", tID), "--net", tID,
 		"--name", tID, testutil.CommonImage).AssertOK()
-	defer base.Cmd("rm", "-f", tID).Run()
 
 	base.Cmd("ps", "-a").AssertOutContains(tID)
 	base.Cmd("images").AssertOutContains(testutil.ImageRepo(testutil.CommonImage))
 
 	base.Cmd("system", "prune", "-f", "--volumes", "--all").AssertOK()
-	base.Cmd("volume", "ls").AssertOutContains(vID) // docker system prune --all --volume does not prune named volume
-	base.Cmd("volume", "ls").AssertNoOut(vID2)      // docker system prune --all --volume prune anonymous volume
+	base.Cmd("volume", "ls").AssertOutContains(tID) // docker system prune --all --volume does not prune named volume
+	base.Cmd("volume", "ls").AssertNoOut(vID)       // docker system prune --all --volume prune anonymous volume
 	base.Cmd("ps", "-a").AssertNoOut(tID)
-	base.Cmd("network", "ls").AssertNoOut(nID)
+	base.Cmd("network", "ls").AssertNoOut(tID)
 	base.Cmd("images").AssertNoOut(testutil.ImageRepo(testutil.CommonImage))
 
 	if testutil.GetTarget() != testutil.Nerdctl {
 		t.Skip("test skipped for buildkitd is not available with docker-compatible tests")
 	}
+
+	testutil.RequireExecutable(t, "buildctl")
 
 	buildctlBinary, err := buildkitutil.BuildctlBinary()
 	if err != nil {

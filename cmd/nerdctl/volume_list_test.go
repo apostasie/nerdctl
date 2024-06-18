@@ -27,20 +27,26 @@ import (
 )
 
 func TestVolumeLs(t *testing.T) {
-	t.Parallel()
-	base := testutil.NewBase(t)
-	tID := testutil.Identifier(t)
 	testutil.DockerIncompatible(t)
 
+	t.Parallel()
+
+	base := testutil.NewBase(t)
+	tID := testutil.Identifier(t)
 	var vol1, vol2, vol3 = tID + "vol-1", tID + "vol-2", tID + "empty"
+
+	var tearDown = func() {
+		base.Cmd("volume", "rm", "-f", vol1).Run()
+		base.Cmd("volume", "rm", "-f", vol2).Run()
+		base.Cmd("volume", "rm", "-f", vol3).Run()
+	}
+
+	tearDown()
+	t.Cleanup(tearDown)
+
 	base.Cmd("volume", "create", vol1).AssertOK()
-	defer base.Cmd("volume", "rm", "-f", vol1).Run()
-
 	base.Cmd("volume", "create", vol2).AssertOK()
-	defer base.Cmd("volume", "rm", "-f", vol2).Run()
-
 	base.Cmd("volume", "create", vol3).AssertOK()
-	defer base.Cmd("volume", "rm", "-f", vol3).Run()
 
 	createFileWithSize(t, vol1, 102400)
 	createFileWithSize(t, vol2, 204800)
@@ -84,22 +90,26 @@ func TestVolumeLs(t *testing.T) {
 
 func TestVolumeLsFilter(t *testing.T) {
 	t.Parallel()
+
 	base := testutil.NewBase(t)
 	tID := testutil.Identifier(t)
-
 	var vol1, vol2, vol3, vol4 = tID + "vol-1", tID + "vol-2", tID + "vol-3", tID + "vol-4"
+
+	var tearDown = func() {
+		base.Cmd("volume", "rm", "-f", vol1).Run()
+		base.Cmd("volume", "rm", "-f", vol2).Run()
+		base.Cmd("volume", "rm", "-f", vol3).Run()
+		base.Cmd("volume", "rm", "-f", vol4).Run()
+	}
+
+	tearDown()
+	t.Cleanup(tearDown)
+
 	var label1, label2, label3, label4 = tID + "=label-1", tID + "=label-2", tID + "=label-3", tID + "-group=label-4"
 	base.Cmd("volume", "create", "--label="+label1, "--label="+label4, vol1).AssertOK()
-	defer base.Cmd("volume", "rm", "-f", vol1).Run()
-
 	base.Cmd("volume", "create", "--label="+label2, "--label="+label4, vol2).AssertOK()
-	defer base.Cmd("volume", "rm", "-f", vol2).Run()
-
 	base.Cmd("volume", "create", "--label="+label3, vol3).AssertOK()
-	defer base.Cmd("volume", "rm", "-f", vol3).Run()
-
 	base.Cmd("volume", "create", vol4).AssertOK()
-	defer base.Cmd("volume", "rm", "-f", vol4).Run()
 
 	base.Cmd("volume", "ls", "--quiet").AssertOutWithFunc(func(stdout string) error {
 		var lines = strings.Split(strings.TrimSpace(stdout), "\n")
@@ -261,23 +271,29 @@ func TestVolumeLsFilter(t *testing.T) {
 }
 
 func TestVolumeLsFilterSize(t *testing.T) {
-	base := testutil.NewBase(t)
-	tID := testutil.Identifier(t)
 	testutil.DockerIncompatible(t)
 
+	t.Parallel()
+
+	base := testutil.NewBase(t)
+	tID := testutil.Identifier(t)
 	var vol1, vol2, vol3, vol4 = tID + "volsize-1", tID + "volsize-2", tID + "volsize-3", tID + "volsize-4"
+
+	var tearDown = func() {
+		base.Cmd("volume", "rm", "-f", vol1).Run()
+		base.Cmd("volume", "rm", "-f", vol2).Run()
+		base.Cmd("volume", "rm", "-f", vol3).Run()
+		base.Cmd("volume", "rm", "-f", vol4).Run()
+	}
+
+	tearDown()
+	t.Cleanup(tearDown)
+
 	var label1, label2, label3, label4 = tID + "=label-1", tID + "=label-2", tID + "=label-3", tID + "-group=label-4"
 	base.Cmd("volume", "create", "--label="+label1, "--label="+label4, vol1).AssertOK()
-	defer base.Cmd("volume", "rm", "-f", vol1).Run()
-
 	base.Cmd("volume", "create", "--label="+label2, "--label="+label4, vol2).AssertOK()
-	defer base.Cmd("volume", "rm", "-f", vol2).Run()
-
 	base.Cmd("volume", "create", "--label="+label3, vol3).AssertOK()
-	defer base.Cmd("volume", "rm", "-f", vol3).Run()
-
 	base.Cmd("volume", "create", vol4).AssertOK()
-	defer base.Cmd("volume", "rm", "-f", vol4).Run()
 
 	createFileWithSize(t, vol1, 409600)
 	createFileWithSize(t, vol2, 1024000)
