@@ -20,7 +20,7 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/containerd/containerd/platforms"
+	"github.com/containerd/platforms"
 	"go.uber.org/mock/gomock"
 	"gotest.tools/v3/assert"
 )

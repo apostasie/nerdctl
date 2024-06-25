@@ -26,9 +26,8 @@ import (
 	"time"
 
 	"github.com/Masterminds/semver/v3"
-	"github.com/containerd/containerd"
-	ptypes "github.com/containerd/containerd/protobuf/types"
-	"github.com/containerd/containerd/services/introspection"
+	containerd "github.com/containerd/containerd/v2/client"
+	ptypes "github.com/containerd/containerd/v2/pkg/protobuf/types"
 	"github.com/containerd/log"
 	"github.com/containerd/nerdctl/v2/pkg/buildkitutil"
 	"github.com/containerd/nerdctl/v2/pkg/inspecttypes/dockercompat"

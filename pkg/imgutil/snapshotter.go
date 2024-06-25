@@ -19,14 +19,12 @@ package imgutil
 import (
 	"strings"
 
-	socisource "github.com/awslabs/soci-snapshotter/fs/source"
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/images"
-	ctdsnapshotters "github.com/containerd/containerd/pkg/snapshotters"
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/images"
+	ctdsnapshotters "github.com/containerd/containerd/v2/pkg/snapshotters"
 	"github.com/containerd/log"
 	"github.com/containerd/nerdctl/v2/pkg/api/types"
 	"github.com/containerd/nerdctl/v2/pkg/imgutil/pull"
-	"github.com/containerd/stargz-snapshotter/fs/source"
 )
 
 const (
@@ -111,9 +109,11 @@ func (dsn *defaultSnapshotterOpts) isRemote() bool {
 }
 
 func stargzExtraLabels(f func(images.Handler) images.Handler, rFlags types.RemoteSnapshotterFlags) func(images.Handler) images.Handler {
-	return source.AppendExtraLabelsHandler(prefetchSize, f)
+	return nil
+	// return source.AppendExtraLabelsHandler(prefetchSize, f)
 }
 
 func sociExtraLabels(f func(images.Handler) images.Handler, rFlags types.RemoteSnapshotterFlags) func(images.Handler) images.Handler {
-	return socisource.AppendDefaultLabelsHandlerWrapper(rFlags.SociIndexDigest, f)
+	return nil
+	// return socisource.AppendDefaultLabelsHandlerWrapper(rFlags.SociIndexDigest, f)
 }

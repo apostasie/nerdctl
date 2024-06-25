@@ -26,18 +26,18 @@ import (
 	"strings"
 
 	overlaybdconvert "github.com/containerd/accelerated-container-image/pkg/convertor"
-	"github.com/containerd/containerd"
-	"github.com/containerd/containerd/content"
-	"github.com/containerd/containerd/images"
-	"github.com/containerd/containerd/images/converter"
-	"github.com/containerd/containerd/images/converter/uncompress"
+	containerd "github.com/containerd/containerd/v2/client"
+	"github.com/containerd/containerd/v2/core/content"
+	"github.com/containerd/containerd/v2/core/images"
+	"github.com/containerd/containerd/v2/core/images/converter"
+	"github.com/containerd/containerd/v2/core/images/converter/uncompress"
 	"github.com/containerd/log"
 	"github.com/containerd/nerdctl/v2/pkg/api/types"
 	"github.com/containerd/nerdctl/v2/pkg/clientutil"
 	converterutil "github.com/containerd/nerdctl/v2/pkg/imgutil/converter"
 	"github.com/containerd/nerdctl/v2/pkg/platformutil"
 	"github.com/containerd/nerdctl/v2/pkg/referenceutil"
-	nydusconvert "github.com/containerd/nydus-snapshotter/pkg/converter"
+	// nydusconvert "github.com/containerd/nydus-snapshotter/pkg/converter"
 	"github.com/containerd/stargz-snapshotter/estargz"
 	estargzconvert "github.com/containerd/stargz-snapshotter/nativeconverter/estargz"
 	estargzexternaltocconvert "github.com/containerd/stargz-snapshotter/nativeconverter/estargz/externaltoc"
@@ -132,30 +132,33 @@ func Convert(ctx context.Context, client *containerd.Client, srcRawRef, targetRa
 			convertFunc = overlaybdconvert.IndexConvertFunc(obdOpts...)
 			convertOpts = append(convertOpts, converter.WithIndexConvertFunc(convertFunc))
 			convertType = "overlaybd"
-		case nydus:
-			nydusOpts, err := getNydusConvertOpts(options)
-			if err != nil {
-				return err
-			}
-			convertHooks := converter.ConvertHooks{
-				PostConvertHook: nydusconvert.ConvertHookFunc(nydusconvert.MergeOption{
-					WorkDir:          nydusOpts.WorkDir,
-					BuilderPath:      nydusOpts.BuilderPath,
-					FsVersion:        nydusOpts.FsVersion,
-					ChunkDictPath:    nydusOpts.ChunkDictPath,
-					PrefetchPatterns: nydusOpts.PrefetchPatterns,
-					OCI:              true,
-				}),
-			}
-			convertOpts = append(convertOpts, converter.WithIndexConvertFunc(
-				converter.IndexConvertFuncWithHook(
-					nydusconvert.LayerConvertFunc(*nydusOpts),
-					true,
-					platMC,
-					convertHooks,
-				)),
-			)
-			convertType = "nydus"
+			/*
+				case nydus:
+					nydusOpts, err := getNydusConvertOpts(options)
+					if err != nil {
+						return err
+					}
+					convertHooks := converter.ConvertHooks{
+						PostConvertHook: nydusconvert.ConvertHookFunc(nydusconvert.MergeOption{
+							WorkDir:          nydusOpts.WorkDir,
+							BuilderPath:      nydusOpts.BuilderPath,
+							FsVersion:        nydusOpts.FsVersion,
+							ChunkDictPath:    nydusOpts.ChunkDictPath,
+							PrefetchPatterns: nydusOpts.PrefetchPatterns,
+							OCI:              true,
+						}),
+					}
+					convertOpts = append(convertOpts, converter.WithIndexConvertFunc(
+						converter.IndexConvertFuncWithHook(
+							nydusconvert.LayerConvertFunc(*nydusOpts),
+							true,
+							platMC,
+							convertHooks,
+						)),
+					)
+					convertType = "nydus"
+
+			*/
 		}
 
 		if convertType != "overlaybd" {

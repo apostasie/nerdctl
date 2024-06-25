@@ -16,11 +16,6 @@
 
 package native
 
-import (
-	introspection "github.com/containerd/containerd/api/services/introspection/v1"
-	version "github.com/containerd/containerd/api/services/version/v1"
-)
-
 type Info struct {
 	Namespace     string      `json:"Namespace,omitempty"`
 	Snapshotter   string      `json:"Snapshotter,omitempty"`
