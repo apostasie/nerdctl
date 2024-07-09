@@ -331,14 +331,14 @@ func getPortMapOpts(opts *handlerOpts) ([]gocni.NamespaceOpts, error) {
 			if hostIP := net.ParseIP(p.HostIP); hostIP != nil && !hostIP.IsUnspecified() {
 				// loopback address is always bindable in the child namespace, but other addresses are unlikely.
 				if !hostIP.IsLoopback() {
-					if !(childIP != nil && childIP.Equal(hostIP)) {
-						if portDriverDisallowsLoopbackChildIP {
+					if childIP == nil || !childIP.Equal(hostIP) {
+						if portDriverDisallowsLoopbackChildIP && childIP != nil {
 							p.HostIP = childIP.String()
 						} else {
 							p.HostIP = "127.0.0.1"
 						}
 					}
-				} else if portDriverDisallowsLoopbackChildIP {
+				} else if portDriverDisallowsLoopbackChildIP && childIP != nil {
 					p.HostIP = childIP.String()
 				}
 			}
