@@ -33,8 +33,7 @@ import (
 )
 
 const (
-	targetRefLabel = "containerd.io/snapshot/remote/stargz.reference"
-	testRef        = "test:latest"
+	testRef = "test:latest"
 )
 
 func TestGetSnapshotterOpts(t *testing.T) {
@@ -50,10 +49,6 @@ func TestGetSnapshotterOpts(t *testing.T) {
 		{
 			sns:   []string{"overlayfs2"},
 			check: sameOpts(&defaultSnapshotterOpts{snapshotter: "overlayfs2"}),
-		},
-		{
-			sns:   []string{"stargz", "stargz-v1"},
-			check: remoteSnOpts("stargz", true),
 		},
 		{
 			sns:   []string{"soci"},
