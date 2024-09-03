@@ -552,7 +552,7 @@ var (
 )
 
 var (
-	testLockFile = filepath.Join(os.TempDir(), "nerdctl-test-prevent-concurrency", ".lock")
+	testLockFile = filepath.Join(os.TempDir(), "nerdctl-test-prevent-concurrency", ".lock_marker")
 )
 
 func M(m *testing.M) {
@@ -602,6 +602,13 @@ func M(m *testing.M) {
 		defer func() {
 			os.Remove(testLockFile)
 		}()
+
+		// Make sure we start with a clean-house.
+		base := NewBase(&testing.T{})
+		leftOverContainers := base.Cmd("ps", "-aq").Out()
+		base.Cmd("rm", "-f", leftOverContainers).Run()
+		leftOverImages := base.Cmd("images", "-q").Out()
+		base.Cmd("rmi", "-f", leftOverImages).Run()
 
 		// Now, run the tests
 		fmt.Fprintf(os.Stderr, "test target: %q\n", flagTestTarget)
