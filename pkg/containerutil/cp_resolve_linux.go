@@ -31,6 +31,13 @@ import (
 	"github.com/containerd/containerd/v2/pkg/oci"
 )
 
+// volumeNameLen returns length of the leading volume name on Windows.
+// It returns 0 elsewhere.
+// FIXME: whenever we will want to port cp to windows, we will need the windows implementation of volumeNameLen
+func volumeNameLen(_ string) int {
+	return 0
+}
+
 var (
 	errDoesNotExist           = errors.New("resource does not exist")                                            // when a path parent dir does not exist
 	errIsNotADir              = errors.New("is not a dir")                                                       // when a path is a file, ending with path separator
