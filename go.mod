@@ -23,6 +23,7 @@ require (
 	github.com/containerd/go-cni v1.1.12
 	github.com/containerd/imgcrypt/v2 v2.0.0
 	github.com/containerd/log v0.1.0
+	github.com/containerd/nerdctl/v2/pkg/testutil/test v0.0.0
 	github.com/containerd/nydus-snapshotter v0.15.0
 	github.com/containerd/platforms v1.0.0-rc.1
 	github.com/containerd/stargz-snapshotter v0.16.3
@@ -147,3 +148,5 @@ require (
 	tags.cncf.io/container-device-interface v0.8.0 // indirect
 	tags.cncf.io/container-device-interface/specs-go v0.8.0 // indirect
 )
+
+replace github.com/containerd/nerdctl/v2/pkg/testutil/test v0.0.0 => ./pkg/testutil/test
