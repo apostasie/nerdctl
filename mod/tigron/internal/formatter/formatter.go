@@ -28,6 +28,8 @@ const (
 	maxLines      = 50
 	kMaxLength    = 7
 	spacer        = " "
+	// The maximum number of characters in a log string above which we just drop it entirely.
+	godzillaThreshod = 10000
 )
 
 // Table formats a `n x 2` dataset into a series of n rows by 2 columns.
@@ -59,13 +61,18 @@ func Table(data [][]any, mark string) string {
 }
 
 // chunk does take a string and split it in lines of maxLength size, accounting for characters display width.
-func chunk(s string, maxLength, maxLines int) []string {
+func chunk(message string, maxLength, maxLines int) []string {
 	chunks := []string{}
 
-	runes := []rune(s)
+	runes := []rune(message)
 
 	size := 0
 	start := 0
+
+	if len(message) > godzillaThreshod {
+		// If HORRIBLY long, just drop them entirely
+		return []string{fmt.Sprintf("!!!!! Godzilla size log discarded (%d)!", len(message))}
+	}
 
 	for index := range runes {
 		var segment string
@@ -107,8 +114,9 @@ func chunk(s string, maxLength, maxLines int) []string {
 		chunks = append(chunks, segment)
 	}
 
-	// If really long, preserve the starting first quarter, the trailing three quarters, and inform.
-	if len(chunks) > maxLines {
+	switch {
+	case len(chunks) > maxLines:
+		// If really long, preserve the starting first quarter, the trailing three quarters, and inform.
 		abbreviator := fmt.Sprintf("... %d lines are being ignored...", len(chunks)-maxLines)
 		chunks = append(
 			append(chunks[0:maxLines/4], abbreviator+strings.Repeat(spacer, maxLength-len(abbreviator))),
@@ -121,7 +129,7 @@ func chunk(s string, maxLength, maxLines int) []string {
 			},
 			chunks...,
 		)
-	} else if len(chunks) == 0 {
+	case len(chunks) == 0:
 		chunks = []string{strings.Repeat(spacer, maxLength)}
 	}
 
